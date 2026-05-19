@@ -1,0 +1,468 @@
+'use strict';
+
+require('dotenv').config();
+
+const fs   = require('fs');
+const path = require('path');
+const os   = require('os');
+const TelegramBot = require('node-telegram-bot-api');
+const {
+    requestPairForUser,
+    getActiveSessions,
+    listSavedSessions,
+    registerCallbacks
+} = require('./session_manager');
+
+let bot = null;
+
+const FORCE_JOIN_CHANNEL = 'crossmdbot';
+const CHANNEL_URL        = `https://t.me/${FORCE_JOIN_CHANNEL}`;
+const SUPPORT_URL        = `https://t.me/crossmdbot`;
+const chatPhoneMap       = new Map();
+
+/* ── MarkdownV2 escape ─────────────────────────────────────────────────── */
+function esc(text) {
+    if (text === null || text === undefined) return '';
+    return String(text).replace(/[_*[\]()~`>#+=|{}.!\\-]/g, '\\$&');
+}
+
+/* ── Links ─────────────────────────────────────────────────────────────── */
+function blue(label, url) { return `*[${esc(label)}](${url})*`; }
+function bluePhone(phone) { return `*[\\+${phone}](https://wa.me/${phone})*`; }
+
+const BOT   = () => blue('Mr nuel Bot', CHANNEL_URL);
+const OWNER = () => blue('༄𝐌𝐑.𝐍𝐔𝐄𝐋♛', CHANNEL_URL);
+const CH    = () => blue('crossmdbot', CHANNEL_URL);
+
+/* ── Telemetry helpers ─────────────────────────────────────────────────── */
+function getRuntime() {
+    const u = process.uptime();
+    const h = Math.floor(u / 3600);
+    const m = Math.floor((u % 3600) / 60);
+    const s = Math.floor(u % 60);
+    return `${h}h ${m}m ${s}s`;
+}
+
+function getRamPct() {
+    return Math.round(((os.totalmem() - os.freem()) / os.totalmem()) * 100);
+}
+
+function makeBar(pct, len) {
+    len = len || 22;
+    const filled = Math.round((pct / 100) * len);
+    return '\u2593'.repeat(filled) + '\u2591'.repeat(len - filled);
+}
+
+/* ── Main menu message & keyboard ──────────────────────────────────────── */
+function buildMainMenu(name, chatId, settings) {
+    const ver      = esc(settings.version || '3.0.6');
+    const runtime  = esc(getRuntime());
+    const sessions = getActiveSessions().size;
+    const ramPct   = getRamPct();
+    const uid      = esc(String(chatId));
+
+    const hour = new Date().getHours();
+    const greeting =
+        hour < 12 ? '\uD83C\uDF05 Good morning'  :
+        hour < 17 ? '\u2600\uFE0F Good afternoon' :
+        hour < 21 ? '\uD83C\uDF06 Good evening'  :
+                    '\uD83C\uDF19 Good night';
+
+    const text =
+        `>${greeting}, *${esc(name)}*\\!\n` +
+        `>\n` +
+        `>\u250C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n` +
+        `>\u2502 \uD83E\uDD16  Bot:    Mr nuel Bot\n` +
+        `>\u2502 \uD83D\uDC68\u200D\uD83D\uDCBB  Dev:    ${OWNER()}\n` +
+        `>\u2502 \uD83D\uDCE6  Build:  v${ver} ULTRA\n` +
+        `>\u2502 \u2B50  Role:   \u25C6 USER\n` +
+        `>\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n` +
+        `>\n` +
+        `>\uD83D\uDCC8 *LIVE  TELEMETRY*\n` +
+        `>\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n` +
+        `>\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n` +
+        `>\n` +
+        `>\u23F1  *Uptime* \u2014\u2014\u2014\u2014\u2014\u2014 ${runtime}\n` +
+        `>\uD83D\uDCE1  *Sessions* \u2014\u2014\u2014 ${esc(String(sessions))} active\n` +
+        `>\uD83C\uDD94  *Your ID* \u2014\u2014\u2014\u2014 ${uid}\n` +
+        `>\uD83D\uDFE2  *UPLINK ESTABLISHED*\n` +
+        `>\n` +
+        `>${makeBar(ramPct, 40)}\n` +
+        `>${makeBar(ramPct, 14)}\n` +
+        `>\n` +
+        `>\u25B8 _Select an operation below_`;
+
+    const keyboard = {
+        inline_keyboard: [
+            [
+                { text: '\u26A1 PAIR DEVICE',   callback_data: 'start_pair'    },
+                { text: '\uD83D\uDC64 ACCOUNT INFO',  callback_data: 'account_info'  }
+            ],
+            [
+                { text: '\uD83D\uDCE1 MY SESSIONS',  callback_data: 'show_sessions' },
+                { text: '\uD83D\uDC8E PREMIUM',       callback_data: 'premium_info'  }
+            ],
+            [
+                { text: '\uD83D\uDD27 STATS',         callback_data: 'bot_stats'     },
+                { text: '\u23F1 UPTIME',              callback_data: 'bot_uptime'    },
+                { text: '\uD83C\uDD94 MY ID',         callback_data: 'my_id'         }
+            ],
+            [
+                { text: '\uD83D\uDCD6 HELP',          callback_data: 'show_help'     },
+                { text: '\u2139\uFE0F ABOUT',         callback_data: 'bot_about'     }
+            ],
+            [
+                { text: '\uD83D\uDCE2 CHANNEL \u2197', url: CHANNEL_URL              },
+                { text: '\uD83D\uDCAC SUPPORT... \u2197', url: SUPPORT_URL           }
+            ]
+        ]
+    };
+
+    return { text, keyboard };
+}
+
+/* ── Join check ────────────────────────────────────────────────────────── */
+async function isChannelMember(chatId) {
+    try {
+        const m = await bot.getChatMember(`@${FORCE_JOIN_CHANNEL}`, chatId);
+        return ['member', 'administrator', 'creator'].includes(m.status);
+    } catch { return false; }
+}
+
+async function sendJoinRequired(chatId, name) {
+    await bot.sendMessage(chatId,
+        `>\u256D\u2550\u2500\u2500\u2500\u22B1 *ACCESS DENIED* \u22B1\u2500\u2500\u2500\u2550\u256E\n` +
+        `>\u2502 \uD83D\uDC64  User:    ${esc(name)}\n` +
+        `>\u2502 \uD83D\uDCE2  Channel: ${CH()}\n` +
+        `>\u2502 \u274C  Status:  Not Joined\n` +
+        `>\u2570\u2550\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2550\u256F\n` +
+        `Join ${CH()} then press /start\\.`,
+        {
+            parse_mode: 'MarkdownV2',
+            reply_markup: {
+                inline_keyboard: [
+                    [{ text: '\uD83D\uDCE2 Join crossmdbot Channel', url: CHANNEL_URL }],
+                    [{ text: '\uD83D\uDD04 I Joined \u2014 Restart', callback_data: 'check_join' }]
+                ]
+            }
+        }
+    );
+}
+
+/* ═══════════════
+   BOT INIT
+═══════════════════════════════════════════════════════════════════════ */
+function initTelegramBot() {
+    const token = process.env.TELEGRAM_BOT_TOKEN || require('./settings').telegramBotToken;
+
+    if (!token || token === 'YOUR_TELEGRAM_BOT_TOKEN') {
+        console.log('\u26A0\uFE0F  TELEGRAM_BOT_TOKEN not set.');
+        return null;
+    }
+
+    try {
+        bot = new TelegramBot(token, { polling: true });
+        console.log('\uD83E\uDD16 Mr nuel Bot started!');
+
+        registerCallbacks({
+            onPairCode: (phone, code, errMsg) => {
+                const chatId = chatPhoneMap.get(phone);
+                if (!chatId) return;
+                if (!code) {
+                    return bot.sendMessage(chatId,
+                        `>\u256D\u2550\u2500\u22B1 *PAIRING FAILED* \u22B1\u2500\u2550\u256E\n` +
+                        `>\u2502 \uD83E\uDD16  Bot:    ${BOT()}\n` +
+                        `>\u2502 \uD83D\uDCF1  Number: ${bluePhone(phone)}\n` +
+                        `>\u2502 \u274C  Status: Failed\n` +
+                        (errMsg ? `>\u2502 \u26A0\uFE0F  Reason: ${esc(errMsg)}\n` : '') +
+                        `>\u2570\u2550\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2550\u256F\nTap *Try Again* to retry\\.`,
+                        { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: [[{ text: '\uD83D\uDD04 Try Again', callback_data: `retry_pair_${phone}` }]] } }
+                    );
+                }
+                bot.sendMessage(chatId,
+                    `>\u256D\u2550\u2500\u22B1 *YOUR PAIRING CODE* \u22B1\u2500\u2550\u256E\n` +
+                    `>\u2502 \uD83E\uDD16  Bot:    ${BOT()}\n` +
+                    `>\u2502 \uD83D\uDCF1  Number: ${bluePhone(phone)}\n` +
+                    `>\u2502 \uD83D\uDD11  Code:   \`${esc(code)}\`\n` +
+                    `>\u2502 \u23F3  Status: Waiting for WhatsApp\n` +
+                    `>\u2570\u2550\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2550\u256F\n` +
+                    `>\uD83D\uDCF1 *How to link:*\n` +
+                    `>\u250A 1\uFE0F\u20E3 Open WhatsApp\n` +
+                    `>\u250A 2\uFE0F\u20E3 Tap \u22EE \u2192 Linked Devices\n` +
+                    `>\u250A 3\uFE0F\u20E3 Tap Link a Device\n` +
+                    `>\u250A 4\uFE0F\u20E3 Tap Link with phone number\n` +
+                    `>\u250A 5\uFE0F\u20E3 Enter the code above\n` +
+                    `_\u23F0 Code expires soon \\— act quickly\\!_`,
+                    {
+                        parse_mode: 'MarkdownV2',
+                        reply_markup: { inline_keyboard: [
+                            [{ text: '\u2705 Done \u2014 I Entered the Code', callback_data: 'pair_done' }],
+                            [{ text: '\uD83D\uDD04 Get a New Code', callback_data: `retry_pair_${phone}` }],
+                            [{ text: '\u2753 Need Help?', callback_data: 'pair_help' }]
+                        ]}
+                    }
+                );
+            },
+
+            onConnected: (phone) => {
+                const chatId = chatPhoneMap.get(phone);
+                if (!chatId) return;
+                bot.sendMessage(chatId,
+                    `>\u256D\u2550\u2500\u22B1 *CONNECTED* \u22B1\u2500\u2550\u256E\n` +
+                    `>\u2502 \uD83E\uDD16  Bot:    ${BOT()}\n` +
+                    `>\u2502 \uD83D\uDCF1  Number: ${bluePhone(phone)}\n` +
+                    `>\u2502 \uD83D\uDC68\u200D\uD83D\uDCBB  Dev:    ${OWNER()}\n` +
+                    `>\u2502 \uD83D\uDFE2  Status: Active\n` +
+                    `>\u2570\u2550\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2550\u256F\n\n\uD83D\uDD25 *"Mr nuel Bot RUNS THIS"*`,
+                    { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: [
+                        [{ text: '\uD83C\uDFE0 Main Menu', callback_data: 'main_menu' }]
+                    ]}}
+                );
+            },
+
+            onDisconnected: (phone) => {
+                const chatId = chatPhoneMap.get(phone);
+                chatPhoneMap.delete(phone);
+                if (!chatId) return;
+                bot.sendMessage(chatId,
+                    `>\u256D\u2550\u2500\u22B1 *DISCONNECTED* \u22B1\u2500\u2550\u256E\n` +
+                    `>\u2502 \uD83E\uDD16  Bot:    ${BOT()}\n` +
+                    `>\u2502 \uD83D\uDCF1  Number: ${bluePhone(phone)}\n` +
+                    `>\u2502 \uD83D\uDD34  Status: Offline\n` +
+                    `>\u2570\u2550\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2550\u256F\nTap *Reconnect* to re\\-link\\.`,
+                    { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: [[{ text: '\uD83D\uDD04 Reconnect', callback_data: `retry_pair_${phone}` }]] }}
+                );
+            }
+        });
+
+        /* /start */
+        bot.onText(/\/start/, async (msg) => {
+            const chatId = msg.chat.id;
+            const name   = msg.from.first_name || 'User';
+            const isMember = await isChannelMember(chatId);
+            if (!isMember) return sendJoinRequired(chatId, name);
+            const settings = require('./settings');
+            const { text, keyboard } = buildMainMenu(name, chatId, settings);
+            const videoPath = path.join(__dirname, 'assets', 'menu.mp4');
+            const opts = { parse_mode: 'MarkdownV2', reply_markup: keyboard };
+            if (fs.existsSync(videoPath)) {
+                await bot.sendVideo(chatId, fs.createReadStream(videoPath), { caption: text, ...opts, supports_streaming: true })
+                    .catch(() => bot.sendMessage(chatId, text, opts));
+            } else {
+                await bot.sendMessage(chatId, text, opts);
+            }
+        });
+
+        /* /pair */
+        bot.onText(/\/pair(?:\s+(.+))?/, async (msg, match) => {
+            const chatId = msg.chat.id;
+            const name   = msg.from.first_name || 'User';
+            const isMember = await isChannelMember(chatId);
+            if (!isMember) return sendJoinRequired(chatId, name);
+            const phoneInput = match && match[1] ? match[1].trim() : null;
+            if (!phoneInput) {
+                return bot.sendMessage(chatId,
+                    `>\u256D\u2550\u2500\u22B1 *PAIR YOUR WHATSAPP* \u22B1\u2500\u2550\u256E\n` +
+                    `>\u2502 \uD83E\uDD16  Bot:     ${BOT()}\n` +
+                    `>\u2502 \uD83D\uDCDD  Usage:   \`/pair <phone>\`\n` +
+                    `>\u2502 \uD83D\uDCA1  Example: \`/pair 2348012345678\`\n` +
+                    `>\u2502 \u2139\uFE0F   Note:    Include country code, no \\+\n` +
+                    `>\u2570\u2550\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2550\u256F`,
+                    { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: [[{ text: '\u2753 How to Pair', callback_data: 'pair_help' }]] }}
+                );
+            }
+            const phone = phoneInput.replace(/[^0-9]/g, '');
+            if (phone.length < 7 || phone.length > 15) {
+                return bot.sendMessage(chatId,
+                    `>\u256D\u2550\u2500\u22B1 *INVALID NUMBER* \u22B1\u2500\u2550\u256E\n` +
+                    `>\u2502 \u274C  Input:   \`${esc(phoneInput)}\`\n` +
+                    `>\u2502 \uD83D\uDCA1  Example: \`2348012345678\`\n` +
+                    `>\u2570\u2550\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2550\u256F`,
+                    { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: [[{ text: '\uD83D\uDD04 Try Again', callback_data: 'start_pair' }]] }}
+                );
+            }
+            const sessions = getActiveSessions();
+            if (sessions.has(phone) && !sessions.get(phone).reconnecting) {
+                return bot.sendMessage(chatId,
+                    `>\u256D\u2550\u2500\u22B1 *ALREADY LINKED* \u22B1\u2500\u2550\u256E\n` +
+                    `>\u2502 \uD83D\uDCF1  Number: ${bluePhone(phone)}\n` +
+                    `>\u2502 \uD83D\uDFE2  Status: Connected\n` +
+                    `>\u2570\u2550\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2550\u256F`,
+                    { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: [[{ text: '\uD83C\uDFE0 Main Menu', callback_data: 'main_menu' }]] }}
+                );
+            }
+            chatPhoneMap.set(phone, chatId);
+            await bot.sendMessage(chatId,
+                `>\u256D\u2550\u2500\u22B1 *GENERATING CODE* \u22B1\u2500\u2550\u256E\n` +
+                `>\u2502 \uD83D\uDCF1  Number: ${bluePhone(phone)}\n` +
+                `>\u2502 \u26A1  Status: Please wait\\.\\.\n` +
+                `>\u2570\u2550\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2550\u256F\n_This may take a few seconds\\._`,
+                { parse_mode: 'MarkdownV2' }
+            );
+            try {
+                const result = await requestPairForUser(phone);
+                if (result === 'ALREADY_CONNECTED') {
+                    bot.sendMessage(chatId,
+                        `>\u256D\u2550\u2500\u22B1 *ALREADY CONNECTED* \u22B1\u2500\u2550\u256E\n` +
+                        `>\u2502 \uD83D\uDCF1  Number: ${bluePhone(phone)}\n` +
+                        `>\u2502 \uD83D\uDFE2  Status: Active\n` +
+                        `>\u2570\u2550\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2550\u256F`,
+                        { parse_mode: 'MarkdownV2' }
+                    );
+                }
+            } catch (err) {
+                console.error('[Telegram] Pair error:', err.message);
+                bot.sendMessage(chatId,
+                    `>\u256D\u2550\u2500\u22B1 *ERROR* \u22B1\u2500\u2550\u256E\n` +
+                    `>\u2502 \uD83D\uDCF1  Number: ${bluePhone(phone)}\n` +
+                    `>\u2502 \u26A0\uFE0F  Reason: ${esc(err.message)}\n` +
+                    `>\u2570\u2550\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2550\u256F\nPlease try again\\.`,
+                    { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: [[{ text: '\uD83D\uDD04 Try Again', callback_data: `retry_pair_${phone}` }]] }}
+                );
+            }
+        });
+
+        /* /sessions */
+        bot.onText(/\/sessions/, async (msg) => {
+            const chatId = msg.chat.id;
+            const name   = msg.from.first_name || 'User';
+            const isMember = await isChannelMember(chatId);
+            if (!isMember) return sendJoinRequired(chatId, name);
+            const saved  = listSavedSessions();
+            const active = getActiveSessions();
+            if (saved.length === 0) {
+                return bot.sendMessage(chatId,
+                    `>\u256D\u2550\u2500\u22B1 *MY SESSIONS* \u22B1\u2500\u2550\u256E\n` +
+                    `>\u2502 \uD83D\uDCCA  Status: No devices linked yet\n` +
+                    `>\u2570\u2550\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2550\u256F\nUse /pair to connect your WhatsApp\\.`,
+                    { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: [[{ text: '\u26A1 Pair Device', callback_data: 'start_pair' }]] }}
+                );
+            }
+            const lines = saved.map((phone, i) => {
+                const entry  = active.get(phone);
+                const status = entry && !entry.reconnecting ? '\uD83D\uDFE2' : '\uD83D\uDD34';
+                return `>\u2502 ${status}  ${i + 1}\\. ${bluePhone(phone)}`;
+            });
+            bot.sendMessage(chatId,
+                `>\u256D\u2550\u2500\u22B1 *MY SESSIONS* \u22B1\u2500\u2550\u256E\n` +
+                `>\u2502 \uD83D\uDCCA  Total: ${esc(String(saved.length))} device\\(s\\)\n` +
+                `>\u2502\n` +
+                `${lines.join('\n')}\n` +
+                `>\u2570\u2550\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2550\u256F\n\n\uD83D\uDD25 *"Mr nuel Bot RUNS THIS"*`,
+                { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: [
+                    [{ text: '\u26A1 Add New Device', callback_data: 'start_pair' }],
+                    [{ text: '\uD83C\uDFE0 Main Menu', callback_data: 'main_menu' }]
+                ]}}
+            );
+        });
+
+        /* /status */
+        bot.onText(/\/status/, async (msg) => {
+            const chatId = msg.chat.id;
+            const name   = msg.from.first_name || 'User';
+            const isMember = await isChannelMember(chatId);
+            if (!isMember) return sendJoinRequired(chatId, name);
+            const settings = require('./settings');
+            const ver      = esc(settings.version || '3.0.6');
+            const runtime  = esc(getRuntime());
+            const sessions = getActiveSessions().size;
+            const ramPct   = getRamPct();
+            bot.sendMessage(chatId,
+                `>\u256D\u2550\u2500\u22B1 *LIVE TELEMETRY* \u22B1\u2500\u2550\u256E\n` +
+                `>\u2502 \uD83E\uDD16  Bot:      ${BOT()}\n` +
+                `>\u2502 \uD83D\uDCE6  Build:    v${ver} ULTRA\n` +
+                `>\u2502 \u23F1   Uptime:   ${runtime}\n` +
+                `>\u2502 \uD83D\uDCE1  Sessions: ${esc(String(sessions))} active\n` +
+                `>\u2502 \uD83D\uDCBE  RAM:      ${ramPct}% used\n` +
+                `>\u2502 \uD83D\uDFE2  Uplink:   ESTABLISHED\n` +
+                `>\u2570\u2550\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2550\u256F\n` +
+                `>${makeBar(ramPct, 40)}\n\n` +
+                `\uD83D\uDD25 *"Mr nuel Bot RUNS THIS"*`,
+                { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: [
+                    [{ text: '\uD83D\uDD04 Refresh',   callback_data: 'check_status' }],
+                    [{ text: '\uD83C\uDFE0 Main Menu', callback_data: 'main_menu' }]
+                ]}}
+            );
+        });
+
+        /* /help */
+        bot.onText(/\/help/, async (msg) => {
+            const chatId = msg.chat.id;
+            const name   = msg.from.first_name || 'User';
+            const isMember = await isChannelMember(chatId);
+            if (!isMember) return sendJoinRequired(chatId, name);
+            await bot.sendMessage(chatId,
+                `>\u256D\u2550\u2500\u22B1 *Mr nuel Bot \u2014 HELP* \u22B1\u2500\u2550\u256E\n` +
+                `>\u2502 \uD83E\uDD16  Bot: ${BOT()}\n` +
+                `>\u2502 \uD83D\uDC68\u200D\uD83D\uDCBB  Dev: ${OWNER()}\n` +
+                `>\u2570\u2550\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2550\u256F\n` +
+                `>\n` +
+                `>\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n` +
+                `>\uD83D\uDCE1  *BOT COMMANDS*\n` +
+                `>\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n` +
+                `>\u2502 \u26A1  /start \u2014\u2014\u2014 Open main menu\n` +
+                `>\u2502 \uD83D\uDD17  /pair \u2014\u2014\u2014\u2014 Link a WhatsApp number\n` +
+                `>\u2502 \uD83D\uDCCA  /status \u2014\u2014\u2014 View live telemetry\n` +
+                `>\u2502 \uD83D\uDCD6  /help \u2014\u2014\u2014\u2014 This help menu\n` +
+                `>\n` +
+                `>\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n` +
+                `>\uD83C\uDF9B\uFE0F  *MENU OPERATIONS*\n` +
+                `>\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n` +
+                `>\u2502 \u26A1  PAIR DEVICE \u2014\u2014 Link a new number\n` +
+                `>\u2502 \uD83D\uDC64  ACCOUNT INFO \u2014 Your Telegram profile\n` +
+                `>\u2502 \uD83D\uDCE1  MY SESSIONS \u2014\u2014 Linked devices\n` +
+                `>\u2502 \uD83D\uDC8E  PREMIUM \u2014\u2014\u2014\u2014\u2014 Premium features\n` +
+                `>\u2502 \uD83D\uDD27  STATS \u2014\u2014\u2014\u2014\u2014\u2014 System & bot stats\n` +
+                `>\u2502 \u23F1   UPTIME \u2014\u2014\u2014\u2014\u2014 Bot running time\n` +
+                `>\u2502 \uD83C\uDD94  MY ID \u2014\u2014\u2014\u2014\u2014\u2014 Your Telegram ID\n` +
+                `>\u2502 \u2139\uFE0F   ABOUT \u2014\u2014\u2014\u2014\u2014\u2014 About Mr nuel Bot\n` +
+                `>\n` +
+                `>\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n` +
+                `>\uD83D\uDCE3  Channel: ${CH()}\n` +
+                `>\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n` +
+                `>\u2B21  *Mr nuel Bot* \u2014 \uD83D\uDD25 *"Mr nuel Bot RUNS THIS"*`,
+                { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: [
+                    [{ text: '\u26A1 Pair Device',  callback_data: 'start_pair'   }],
+                    [{ text: '\uD83D\uDCCA Live Status', callback_data: 'check_status' }],
+                    [{ text: '\uD83C\uDFE0 Main Menu',  callback_data: 'main_menu'    }]
+                ]}}
+            );
+        });
+
+        /* Callbacks */
+        bot.on('callback_query', async (query) => {
+            const chatId = query.message.chat.id;
+            const name   = query.from.first_name || 'User';
+            const data   = query.data;
+            await bot.answerCallbackQuery(query.id).catch(() => {});
+
+            if (data === 'check_join') {
+                const isMember = await isChannelMember(chatId);
+                if (isMember) {
+                    const settings = require('./settings');
+                    const { text, keyboard } = buildMainMenu(name, chatId, settings);
+                    await bot.sendMessage(chatId, text, { parse_mode: 'MarkdownV2', reply_markup: keyboard });
+                } else { await sendJoinRequired(chatId, name); }
+                return;
+            }
+
+            if (data === 'main_menu') {
+                const isMember = await isChannelMember(chatId);
+                if (!isMember) return sendJoinRequired(chatId, name);
+                const settings = require('./settings');
+                const { text, keyboard } = buildMainMenu(name, chatId, settings);
+                await bot.sendMessage(chatId, text, { parse_mode: 'MarkdownV2', reply_markup: keyboard });
+                return;
+            }
+
+            if (data === 'start_pair') {
+                await bot.sendMessage(chatId,
+                    `>\u256D\u2550\u2500\u22B1 *PAIR YOUR WHATSAPP* \u22B1\u2500\u2550\u256E\n` +
+                    `>\u2502 \uD83D\uDCDD  Usage:   \`/pair <phone>\`\n` +
+                    `>\u2502 \uD83D\uDCA1  Example: \`/pair 2348012345678\`\n` +
+                    `>\u2502 \u2139\uFE0F   Note:    Include country code, no \\+\n` +
+                    `>\u2570\u2550\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2550\u256F`,
+                    { parse_mode: 'MarkdownV2' }
+                );
+                return;
+           
